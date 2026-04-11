@@ -1,0 +1,8 @@
+boto3
+pymupdf
+psycopg2-binary
+pgvector
+python-dotenv
+python-jose
+passlib
+requests

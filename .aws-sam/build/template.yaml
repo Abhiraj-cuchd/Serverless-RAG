@@ -1,0 +1,145 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 120
+    MemorySize: 1024
+    Environment:
+      Variables:
+        AWS_REGION_NAME:
+          Fn::Sub: ${AWS::Region}
+        S3_BUCKET: abhiraj-rag-docs
+        SUPABASE_DB_URL:
+          Fn::Sub: '{{resolve:ssm:/serverless-rag/supabase-db-url}}'
+        SARVAM_API_KEY:
+          Fn::Sub: '{{resolve:ssm:/serverless-rag/sarvam-api-key}}'
+        JWT_SECRET_KEY:
+          Fn::Sub: '{{resolve:ssm:/serverless-rag/jwt-secret-key}}'
+        JWT_ALGORITHM: HS256
+        JWT_EXPIRY_MINUTES: '60'
+Resources:
+  IngestionDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: serverless-rag-ingestion-dlq
+      MessageRetentionPeriod: 1209600
+  IngestionQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: serverless-rag-ingestion-queue
+      VisibilityTimeout: 120
+      RedrivePolicy:
+        deadLetterTargetArn:
+          Fn::GetAtt:
+          - IngestionDLQ
+          - Arn
+        maxReceiveCount: 3
+  IngestionQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+      - Ref: IngestionQueue
+      PolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: s3.amazonaws.com
+          Action: sqs:SendMessage
+          Resource:
+            Fn::GetAtt:
+            - IngestionQueue
+            - Arn
+          Condition:
+            ArnLike:
+              aws:SourceArn: arn:aws:s3:::abhiraj-rag-docs
+  IngestionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: serverless-rag-ingestion
+      CodeUri: IngestionFunction
+      Handler: handler.handler
+      Events:
+        SQSTrigger:
+          Type: SQS
+          Properties:
+            Queue:
+              Fn::GetAtt:
+              - IngestionQueue
+              - Arn
+            BatchSize: 1
+      Policies:
+      - S3ReadPolicy:
+          BucketName: abhiraj-rag-docs
+      - SQSPollerPolicy:
+          QueueName:
+            Fn::GetAtt:
+            - IngestionQueue
+            - QueueName
+      - Statement:
+        - Effect: Allow
+          Action: bedrock:InvokeModel
+          Resource: '*'
+    Metadata:
+      SamResourceId: IngestionFunction
+  QueryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: serverless-rag-query
+      CodeUri: QueryFunction
+      Handler: handler.handler
+      Events:
+        QueryApi:
+          Type: Api
+          Properties:
+            Path: /query
+            Method: post
+        HistoryApi:
+          Type: Api
+          Properties:
+            Path: /query/history
+            Method: get
+        RegisterApi:
+          Type: Api
+          Properties:
+            Path: /auth/register
+            Method: post
+        LoginApi:
+          Type: Api
+          Properties:
+            Path: /auth/login
+            Method: post
+        UploadApi:
+          Type: Api
+          Properties:
+            Path: /ingest/upload
+            Method: post
+        DocumentsApi:
+          Type: Api
+          Properties:
+            Path: /ingest/documents
+            Method: get
+      Policies:
+      - S3WritePolicy:
+          BucketName: abhiraj-rag-docs
+      - S3ReadPolicy:
+          BucketName: abhiraj-rag-docs
+      - Statement:
+        - Effect: Allow
+          Action: bedrock:InvokeModel
+          Resource: '*'
+    Metadata:
+      SamResourceId: QueryFunction
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value:
+      Fn::Sub: https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod
+  IngestionQueueUrl:
+    Description: SQS ingestion queue URL
+    Value:
+      Ref: IngestionQueue
+  DLQUrl:
+    Description: Dead Letter Queue URL
+    Value:
+      Ref: IngestionDLQ
