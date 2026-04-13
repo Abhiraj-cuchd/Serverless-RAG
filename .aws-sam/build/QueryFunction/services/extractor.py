@@ -5,16 +5,19 @@ logger =  logging.getLogger(__name__)
 
 
 def extract_text_from_pdf(file_path: str) -> str:
-    """Extract all text from a PDF file and return it as a single string"""
+    """Extract all text from a PDF file and return it as a single string."""
     try:
         document = fitz.open(file_path)
         pages_text = [page.get_text() for page in document]
         full_text = "\n".join(pages_text)
+
+        # Remove NUL characters — PostgreSQL rejects strings containing 0x00
+        full_text = full_text.replace("\x00", "")
+
         logger.info(f"Extracted text from PDF: {file_path} ({len(pages_text)} pages)")
         return full_text
-    
     except Exception as e:
-        raise RuntimeError(f"Failed to extract text from PDF: {file_path}: {e}")
+        raise RuntimeError(f"Failed to extract text from PDF {file_path}: {e}")
     
 def extract_text_from_txt(file_path: str) -> str:
     """Extract all text from a plain TXT file and return it as a string."""

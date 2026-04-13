@@ -12,7 +12,7 @@ RATE_LIMIT_MAX = 40       # max requests
 RATE_LIMIT_WINDOW = 60    # per 60 seconds
 
 SARVAM_API_URL = "https://api.sarvam.ai/v1/chat/completions"
-SARVAM_MODEL = "sarvam-m"
+SARVAM_MODEL = "sarvam-105b"
 
 def check_rate_limit() -> None:
     """
@@ -50,7 +50,6 @@ def build_prompt(
     """
     messages = []
 
-    # System instruction — tells the AI how to behave
     messages.append({
         "role": "system",
         "content": (
@@ -62,18 +61,22 @@ def build_prompt(
         )
     })
 
-    # Add last 3 messages from chat history so follow-up questions work naturally
     for message in chat_history[-3:]:
         messages.append({"role": "user", "content": message["question"]})
         messages.append({"role": "assistant", "content": message["answer"]})
 
-    # Build context block from retrieved chunks
+    # Truncate each chunk to 300 words to stay within token limits
+    truncated_chunks = []
+    for chunk in context_chunks:
+        words = chunk["chunk_text"].split()
+        truncated_text = " ".join(words[:300])
+        truncated_chunks.append({**chunk, "chunk_text": truncated_text})
+
     context_text = "\n\n---\n\n".join([
         f"Source: {chunk['document_id']}\n{chunk['chunk_text']}"
-        for chunk in context_chunks
+        for chunk in truncated_chunks
     ])
 
-    # Final user message — context + actual question
     messages.append({
         "role": "user",
         "content": (

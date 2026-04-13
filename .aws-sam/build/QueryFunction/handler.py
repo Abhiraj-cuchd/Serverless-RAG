@@ -143,6 +143,7 @@ def handle_query(event: dict, user_id: str) -> dict:
             top_k=5,
             document_ids=document_ids if document_ids else None
         )
+        logger.info(f"Retrieved chunks: {[c['chunk_text'][:100] for c in chunks]}")
 
         if not chunks:
             return build_response(200, {
