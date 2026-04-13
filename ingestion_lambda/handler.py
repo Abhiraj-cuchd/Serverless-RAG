@@ -11,6 +11,8 @@ from services.extractor import extract_text
 from services.chunker import chunk_text
 from services.embedder import embed_many
 from services.vector_store import store_embeddings, update_document_status
+from services.cache import invalidate_user_cache
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -31,7 +33,7 @@ def download_from_s3(s3_key: str, local_path: str) -> None:
 def process_document(s3_key: str, user_id: str, document_id: str) -> None:
     """
     Full ingestion pipeline for one document.
-    Download → Extract → Chunk → Embed → Store
+    Download → Extract → Chunk → Embed → Store -> Invlidate Cache
     """
     file_extension = s3_key.split(".")[-1]
 
@@ -61,6 +63,9 @@ def process_document(s3_key: str, user_id: str, document_id: str) -> None:
         # Step 6 — Mark document as ready
         update_document_status(DB_URL, document_id, "ready")
         logger.info(f"Document {document_id} ingestion complete")
+        invalidate_user_cache(DB_URL, user_id)
+        logger.info(f"Cache invalidated for user {user_id} after new document")
+
 
     except Exception as e:
         # Mark document as failed so user knows something went wrong

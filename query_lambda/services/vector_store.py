@@ -44,32 +44,96 @@ def store_embeddings(
     except Exception as e:
         raise RuntimeError(f"Failed to store embeddings: {e}")
 
+#
+# def search_similar_chunks(
+#     db_url: str,
+#     user_id: str,
+#     query_embedding: list[float],
+#     top_k: int = 5
+# ) -> list[dict]:
+#     """
+#     Search for the top K most similar chunks for a given query vector.
+#     Results are scoped strictly to the logged-in user — no cross-user leakage.
+#     """
+#     try:
+#         conn = get_connection(db_url)
+#         cursor = conn.cursor()
+#
+#         cursor.execute(
+#             """
+#             SELECT chunk_text, chunk_index, document_id,
+#                    1 - (embedding <=> %s::vector) AS similarity
+#             FROM embeddings
+#             WHERE user_id = %s
+#             ORDER BY embedding <=> %s::vector
+#             LIMIT %s
+#             """,
+#             (query_embedding, user_id, query_embedding, top_k)
+#         )
+#
+#         rows = cursor.fetchall()
+#         cursor.close()
+#         conn.close()
+#
+#         results = [
+#             {
+#                 "chunk_text": row[0],
+#                 "chunk_index": row[1],
+#                 "document_id": str(row[2]),
+#                 "similarity": float(row[3])
+#             }
+#             for row in rows
+#         ]
+#
+#         logger.info(f"Found {len(results)} similar chunks for user {user_id}")
+#         return results
+#
+#     except Exception as e:
+#         raise RuntimeError(f"Failed to search embeddings: {e}")
 
 def search_similar_chunks(
     db_url: str,
     user_id: str,
     query_embedding: list[float],
-    top_k: int = 5
+    top_k: int = 5,
+    document_ids: list[str] | None = None
 ) -> list[dict]:
     """
     Search for the top K most similar chunks for a given query vector.
-    Results are scoped strictly to the logged-in user — no cross-user leakage.
+    Results are scoped strictly to the logged-in user.
+    Optionally filter by specific document IDs.
     """
     try:
         conn = get_connection(db_url)
         cursor = conn.cursor()
 
-        cursor.execute(
-            """
-            SELECT chunk_text, chunk_index, document_id,
-                   1 - (embedding <=> %s::vector) AS similarity
-            FROM embeddings
-            WHERE user_id = %s
-            ORDER BY embedding <=> %s::vector
-            LIMIT %s
-            """,
-            (query_embedding, user_id, query_embedding, top_k)
-        )
+        if document_ids:
+            # Search only within selected documents
+            cursor.execute(
+                """
+                SELECT chunk_text, chunk_index, document_id,
+                       1 - (embedding <=> %s::vector) AS similarity
+                FROM embeddings
+                WHERE user_id = %s
+                AND document_id = ANY(%s::uuid[])
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s
+                """,
+                (query_embedding, user_id, document_ids, query_embedding, top_k)
+            )
+        else:
+            # Search all user documents
+            cursor.execute(
+                """
+                SELECT chunk_text, chunk_index, document_id,
+                       1 - (embedding <=> %s::vector) AS similarity
+                FROM embeddings
+                WHERE user_id = %s
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s
+                """,
+                (query_embedding, user_id, query_embedding, top_k)
+            )
 
         rows = cursor.fetchall()
         cursor.close()
@@ -85,7 +149,10 @@ def search_similar_chunks(
             for row in rows
         ]
 
-        logger.info(f"Found {len(results)} similar chunks for user {user_id}")
+        logger.info(
+            f"Found {len(results)} chunks for user {user_id}"
+            f"{f' filtered to {len(document_ids)} docs' if document_ids else ''}"
+        )
         return results
 
     except Exception as e:

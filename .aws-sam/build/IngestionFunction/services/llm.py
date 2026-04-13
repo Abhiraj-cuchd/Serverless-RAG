@@ -1,10 +1,42 @@
 import logging
 import requests
+import re
+import time
+import collections
 
 logger = logging.getLogger(__name__)
 
+# ── Rate Limiter ───────────────────────────────────────────────────
+_request_timestamps = collections.deque()
+RATE_LIMIT_MAX = 40       # max requests
+RATE_LIMIT_WINDOW = 60    # per 60 seconds
+
 SARVAM_API_URL = "https://api.sarvam.ai/v1/chat/completions"
 SARVAM_MODEL = "sarvam-m"
+
+def check_rate_limit() -> None:
+    """
+    Track request timestamps and raise an error if rate limit is exceeded.
+    Allows max 40 requests per 60 second window.
+    """
+    now = time.time()
+    window_start = now - RATE_LIMIT_WINDOW
+
+    # Remove timestamps older than the window
+    while _request_timestamps and _request_timestamps[0] < window_start:
+        _request_timestamps.popleft()
+
+    # Check if limit is hit
+    if len(_request_timestamps) >= RATE_LIMIT_MAX:
+        oldest = _request_timestamps[0]
+        wait_seconds = int(RATE_LIMIT_WINDOW - (now - oldest)) + 1
+        raise RuntimeError(
+            f"Rate limit exceeded. Maximum {RATE_LIMIT_MAX} requests "
+            f"per minute. Please wait {wait_seconds} seconds."
+        )
+
+    # Record this request
+    _request_timestamps.append(now)
 
 
 def build_prompt(
@@ -64,6 +96,7 @@ def get_answer(
     Send the question + context + history to Sarvam AI.
     Returns the generated answer as a string.
     """
+    check_rate_limit()
     try:
         messages = build_prompt(question, context_chunks, chat_history)
 
@@ -90,8 +123,10 @@ def get_answer(
         result = response.json()
         answer = result["choices"][0]["message"]["content"]
 
+        clean_answer = re.sub(r"<think>.*?</think>", "", answer, flags=re.DOTALL).strip()
+
         logger.info(f"Sarvam AI returned answer of {len(answer)} characters")
-        return answer
+        return clean_answer
 
     except requests.exceptions.Timeout:
         raise RuntimeError("Sarvam AI request timed out after 30 seconds.")
