@@ -7,12 +7,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from services.embedder import embed_text
-from services.vector_store import search_similar_chunks
-from services.llm import get_answer, get_chat_history, save_chat_message
-from services.auth import decode_jwt_token
+from services.llm import get_answer, get_chat_history, save_chat_message, expand_query
 from services.auth import decode_jwt_token, create_user, login_user
 from services.cache import generate_cache_key, get_cached_answer, save_cached_answer
-from services.vector_store import search_similar_chunks, update_document_status
+from services.vector_store import hybrid_search
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -105,14 +103,13 @@ def handle_login(event: dict) -> dict:
         logger.error(f"Login error: {e}")
         return build_response(500, {"error": "Something went wrong."})
 
-
 def handle_query(event: dict, user_id: str) -> dict:
     """Handle POST /query — token required."""
     try:
         body = json.loads(event.get("body", "{}"))
         question = body.get("question", "").strip()
         session_id = body.get("session_id", None)
-        document_ids = body.get("document_ids", [])  # optional filter
+        document_ids = body.get("document_ids", [])
 
         if not question:
             return build_response(400, {"error": "question is required."})
@@ -122,7 +119,7 @@ def handle_query(event: dict, user_id: str) -> dict:
         cached_answer = get_cached_answer(DB_URL, cache_key)
 
         if cached_answer:
-            logger.info(f"Cache HIT — returning cached answer")
+            logger.info("Cache HIT — returning cached answer")
             session_id = get_session_or_create(DB_URL, user_id, session_id, question)
             save_chat_message(DB_URL, session_id, user_id, question, cached_answer, [])
             return build_response(200, {
@@ -132,43 +129,69 @@ def handle_query(event: dict, user_id: str) -> dict:
                 "cached": True
             })
 
-        # Step 2 — embed the question
-        query_embedding = embed_text(question, AWS_REGION)
+        # Step 2 — detect summary request
+        SUMMARY_KEYWORDS = [
+            "summary", "summarize", "summarise", "overview",
+            "what is this document", "what does this document",
+            "what is this pdf", "tell me about this document",
+            "what topics", "what chapters", "table of contents"
+        ]
+        is_summary_request = any(
+            kw in question.lower() for kw in SUMMARY_KEYWORDS
+        )
 
-        # Step 3 — search pgvector with optional document filter
-        chunks = search_similar_chunks(
+        # Step 3 — expand query for better retrieval
+        expanded_question = expand_query(question, SARVAM_API_KEY)
+        if not expanded_question or not expanded_question.strip():
+            expanded_question = question
+            logger.warning("Query expansion returned empty — using original question")
+
+        # Step 4 — embed the EXPANDED question
+        query_embedding = embed_text(expanded_question, AWS_REGION)
+
+        # Step 5 — hybrid search with appropriate top_k
+        top_k = 15 if is_summary_request else 5
+        chunks = hybrid_search(
             DB_URL,
             user_id,
             query_embedding,
-            top_k=5,
+            question,
+            top_k=top_k,
             document_ids=document_ids if document_ids else None
         )
-        logger.info(f"Retrieved chunks: {[c['chunk_text'][:100] for c in chunks]}")
+        # After hybrid_search call — temporary debug
+        logger.info(f"Chunks returned: {[c['chunk_text'][:80] for c in chunks]}")
 
         if not chunks:
             return build_response(200, {
-                "answer": "I could not find relevant information in your documents.",
+                "answer": f"I could not find relevant information in your documents. Chunks returned: {[c['chunk_text'][:80] for c in chunks]}",
                 "session_id": session_id,
                 "sources": [],
                 "cached": False
             })
 
-        # Step 4 — get or create session
+        # Step 6 — get or create session
         session_id = get_session_or_create(DB_URL, user_id, session_id, question)
 
-        # Step 5 — fetch last 3 messages for context
+        # Step 7 — fetch last 3 messages for context
         chat_history = get_chat_history(DB_URL, session_id)
 
-        # Step 6 — get answer from Sarvam AI
-        answer = get_answer(question, chunks, chat_history, SARVAM_API_KEY)
+        # Step 8 — get answer from Sarvam AI
+        answer = get_answer(
+            question,
+            chunks,
+            chat_history,
+            SARVAM_API_KEY,
+            is_summary=is_summary_request
+        )
 
-        # Step 7 — extract sources
+        # Step 9 — extract sources
         sources = list(set(chunk["document_id"] for chunk in chunks))
 
-        # Step 8 — save to cache
+        # Step 10 — save to cache
         save_cached_answer(DB_URL, cache_key, user_id, question, answer, document_ids)
 
-        # Step 9 — save to chat history
+        # Step 11 — save to chat history
         save_chat_message(DB_URL, session_id, user_id, question, answer, sources)
 
         return build_response(200, {

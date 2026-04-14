@@ -28,8 +28,8 @@ from services.auth import login_user
 
 token = login_user(
     db_url=os.getenv("SUPABASE_DB_URL"),
-    email="testuser@example.com",
-    plain_password="testpassword123",
+    email="test@yopmail.com",
+    plain_password="Test@1234",
     secret_key=os.getenv("JWT_SECRET_KEY"),
     algorithm=os.getenv("JWT_ALGORITHM"),
     expiry_minutes=int(os.getenv("JWT_EXPIRY_MINUTES"))

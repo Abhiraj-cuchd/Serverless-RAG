@@ -14,6 +14,77 @@ RATE_LIMIT_WINDOW = 60    # per 60 seconds
 SARVAM_API_URL = "https://api.sarvam.ai/v1/chat/completions"
 SARVAM_MODEL = "sarvam-105b"
 
+
+def expand_query(question: str, sarvam_api_key: str) -> str:
+    """
+    Rewrite a short question into a descriptive paragraph.
+    Improves vector similarity matching for short or vague queries.
+    """
+    # Safety guard — never pass None to Sarvam AI
+    if not question:
+        return ""
+
+    question = str(question).strip()
+    if not question:
+        return ""
+
+    try:
+        headers = {
+            "api-subscription-key": sarvam_api_key,
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": SARVAM_MODEL,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a search query expander. "
+                        "Rewrite the user's question into a descriptive paragraph "
+                        "of 2-3 sentences that would help find relevant content in a document. "
+                        "Output only the expanded query. Nothing else."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": question
+                }
+            ],
+            "max_tokens": 150,
+            "temperature": 0.1
+        }
+
+        response = requests.post(
+            SARVAM_API_URL,
+            headers=headers,
+            json=payload,
+            timeout=15
+        )
+        response.raise_for_status()
+
+        content = response.json()["choices"][0]["message"]["content"]
+
+        # Guard against None response content
+        if not content:
+            return question
+
+        expanded = content.strip()
+
+        # Strip think block if present
+        if "<think>" in expanded and "</think>" in expanded:
+            expanded = expanded.split("</think>")[-1].strip()
+
+        # Final guard — if expansion is empty fall back to original
+        if not expanded:
+            return question
+
+        logger.info(f"Expanded query: {expanded[:100]}")
+        return expanded
+
+    except Exception as e:
+        logger.warning(f"Query expansion failed, using original: {e}")
+        return question
+
 def check_rate_limit() -> None:
     """
     Track request timestamps and raise an error if rate limit is exceeded.
@@ -42,7 +113,8 @@ def check_rate_limit() -> None:
 def build_prompt(
     question: str,
     context_chunks: list[dict],
-    chat_history: list[dict]
+    chat_history: list[dict],
+    is_summary: bool = False
 ) -> list[dict]:
     """
     Build the messages list to send to Sarvam AI.
@@ -65,17 +137,23 @@ def build_prompt(
         messages.append({"role": "user", "content": message["question"]})
         messages.append({"role": "assistant", "content": message["answer"]})
 
+    max_words_per_chunk = 100 if is_summary else 300
+
     # Truncate each chunk to 300 words to stay within token limits
     truncated_chunks = []
     for chunk in context_chunks:
         words = chunk["chunk_text"].split()
-        truncated_text = " ".join(words[:300])
+        truncated_text = " ".join(words[:max_words_per_chunk])
         truncated_chunks.append({**chunk, "chunk_text": truncated_text})
 
     context_text = "\n\n---\n\n".join([
         f"Source: {chunk['document_id']}\n{chunk['chunk_text']}"
         for chunk in truncated_chunks
+        if chunk.get('chunk_text')  # skip any chunks with None text
     ])
+
+    if not context_text:
+        context_text = "No relevant context found."
 
     messages.append({
         "role": "user",
@@ -93,15 +171,24 @@ def get_answer(
     question: str,
     context_chunks: list[dict],
     chat_history: list[dict],
-    sarvam_api_key: str
+    sarvam_api_key: str,
+    is_summary: bool = False
 ) -> str:
     """
     Send the question + context + history to Sarvam AI.
     Returns the generated answer as a string.
     """
+    # Safety guard
+    if not question or not question.strip():
+        raise ValueError("Question cannot be empty.")
+
+    if not context_chunks:
+        raise ValueError("No context chunks provided.")
+
     check_rate_limit()
+
     try:
-        messages = build_prompt(question, context_chunks, chat_history)
+        messages = build_prompt(question, context_chunks, chat_history, is_summary)
 
         headers = {
             "api-subscription-key": sarvam_api_key,
